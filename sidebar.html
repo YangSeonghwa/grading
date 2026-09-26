@@ -1,0 +1,341 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <base target="_top">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <style>
+    :root { --blue: #1a73e8; --border: #dadce0; --text: #202124; --muted: #5f6368; --bg: #f8fafd; }
+    * { box-sizing: border-box; }
+    body { margin: 0; padding: 16px; color: var(--text); background: var(--bg); font: 13px/1.45 Arial, sans-serif; }
+    h1 { margin: 0 0 4px; font-size: 20px; }
+    h2 { margin: 22px 0 8px; font-size: 14px; }
+    .subtle { color: var(--muted); font-size: 12px; }
+    .section { padding: 14px; margin: 10px 0; background: #fff; border: 1px solid var(--border); border-radius: 8px; }
+    label { display: block; margin: 10px 0 5px; font-weight: 600; }
+    input, select { width: 100%; min-height: 34px; padding: 7px 9px; border: 1px solid #bdc1c6; border-radius: 4px; background: #fff; color: var(--text); }
+    input[type="checkbox"] { width: auto; min-height: 0; margin: 0 8px 0 0; }
+    button { width: 100%; min-height: 36px; margin-top: 10px; padding: 8px 12px; border: 0; border-radius: 4px; color: #fff; background: var(--blue); font-weight: 600; cursor: pointer; }
+    button.secondary { color: var(--blue); background: #e8f0fe; }
+    button:disabled { opacity: .6; cursor: wait; }
+    .row { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+    .assignment-list { max-height: 220px; overflow: auto; border: 1px solid var(--border); border-radius: 4px; background: #fff; }
+    .assignment { display: flex; align-items: flex-start; gap: 7px; padding: 8px; border-bottom: 1px solid #edf0f2; font-weight: normal; }
+    .assignment:last-child { border-bottom: 0; }
+    .assignment span { flex: 1; }
+    .assignment small { display: block; color: var(--muted); }
+    .drive-path { padding: 8px; overflow: auto; white-space: nowrap; border: 1px solid var(--border); border-radius: 4px; background: #f8fafd; }
+    .drive-path button { display: inline; width: auto; min-height: 0; margin: 0; padding: 0; color: var(--blue); background: transparent; font-weight: 600; }
+    .folder-list { max-height: 180px; overflow: auto; margin-top: 8px; border: 1px solid var(--border); border-radius: 4px; background: #fff; }
+    .folder-button { display: block; width: 100%; margin: 0; padding: 8px 10px; border-bottom: 1px solid #edf0f2; border-radius: 0; color: var(--text); background: #fff; text-align: left; font-weight: normal; }
+    .folder-button:last-child { border-bottom: 0; }
+    .status { margin-top: 10px; padding: 9px; border-radius: 4px; background: #eef3f8; color: var(--muted); white-space: pre-wrap; }
+    .status.error { background: #fce8e6; color: #b3261e; }
+    .job { padding: 8px 0; border-bottom: 1px solid #edf0f2; }
+    .job:last-child { border-bottom: 0; }
+    .job-title { font-weight: 600; }
+    .job-meta { color: var(--muted); font-size: 11px; }
+    .hidden { display: none; }
+  </style>
+</head>
+<body>
+  <h1>AI 자동 채점</h1>
+  <div class="subtle">선택한 API 규격으로 Classroom 제출물을 채점합니다.</div>
+
+  <div class="section">
+    <h2>API 설정</h2>
+    <label for="apiFormat">API 규격</label>
+    <select id="apiFormat">
+      <option value="chat_completions">OpenAI 호환 · Chat Completions</option>
+      <option value="responses">OpenAI · Responses</option>
+      <option value="claude">Claude · Messages</option>
+    </select>
+    <label for="baseUrl">Base URL</label>
+    <input id="baseUrl" type="url" placeholder="https://api.example.com/v1">
+    <div id="apiFormatHint" class="subtle"></div>
+    <label for="apiKey">API 키</label>
+    <input id="apiKey" type="password" placeholder="API 키를 입력하세요. 저장된 키는 다시 표시하지 않습니다.">
+    <label for="modelSelect">모델 선택</label>
+    <div class="row model-row">
+      <select id="modelSelect"><option value="">모델 목록을 불러오세요.</option></select>
+      <button type="button" class="secondary" id="refreshModels">불러오기</button>
+    </div>
+    <label for="model">모델 ID 직접 입력</label>
+    <input id="model" type="text" placeholder="모델 ID">
+    <div class="subtle">API 오류 코드는 10분 간격으로 재시도합니다. 크레딧 부족 또는 소진 응답이면 중단합니다.</div>
+    <button class="secondary" id="saveSettings">설정 저장</button>
+  </div>
+
+  <div class="section">
+    <h2>채점 대상</h2>
+    <label>과제 폴더 선택</label>
+    <div id="assignmentPath" class="drive-path">Classroom</div>
+    <div id="assignmentFolders" class="folder-list"><div class="subtle" style="padding:10px">Classroom 폴더에서 과제 폴더를 선택하세요.</div></div>
+    <div id="assignmentSelection" class="status">과제 폴더를 선택하세요.</div>
+    <button class="secondary" id="confirmAssignment" disabled>과제 폴더 확정</button>
+    <label>정답지 폴더 탐색</label>
+    <div id="answerKeyPath" class="drive-path">내 드라이브</div>
+    <div id="answerKeyFolders" class="folder-list"><div class="subtle" style="padding:10px">정답지 폴더를 불러오는 중...</div></div>
+    <label for="answerKey">정답지 Google Docs 선택</label>
+    <select id="answerKey"><option value="">불러오는 중...</option></select>
+  </div>
+
+  <div class="section">
+    <h2>채점 방식</h2>
+    <label for="gradingMode">점수 반영 범위</label>
+    <select id="gradingMode">
+      <option value="quantitative">정량평가만 반영</option>
+      <option value="all">정량 + 정성평가 모두 반영</option>
+    </select>
+    <div class="row">
+      <div><label for="maxScore">만점</label><input id="maxScore" type="number" min="1" max="100000" step="1" value="100"></div>
+      <div><label for="maxOutputTokens">최대 출력 토큰</label><input id="maxOutputTokens" type="number" min="8192" max="65536" step="1024" value="65536"></div>
+    </div>
+    <div class="subtle">전체 제출물을 먼저 한 번에 채점합니다. JSON 오류 시 13명 이하 묶음으로 재시도합니다.</div>
+    <label><input id="aiUseDetection" type="checkbox"> 정성평가 문장의 AI 사용 의심 분석 포함</label>
+    <div class="subtle">확정 판정이 아닌 참고용 신호이며, 의심 수준과 근거 문장을 결과 시트에 기록합니다.</div>
+    <button id="start">예약 큐에 추가</button>
+    <div id="message" class="status">준비 중...</div>
+  </div>
+
+  <div class="section">
+    <h2>예약 큐 확인</h2>
+    <div id="jobs"><div class="subtle">작업 없음</div></div>
+    <button id="runAll">예약 큐 전체 실행</button>
+    <button class="secondary" id="refreshJobs">상태 새로고침</button>
+  </div>
+
+  <script>
+    const $ = (id) => document.getElementById(id);
+    let data = { pendingAssignment: null, confirmedAssignmentId: '', models: [], settings: {}, assignmentBrowser: null, answerKeyBrowser: null };
+    let queueStatusRequestId = 0;
+
+    function call(name, ...args) {
+      return new Promise((resolve, reject) => {
+        google.script.run.withSuccessHandler(resolve).withFailureHandler((error) => reject(error))[name](...args);
+      });
+    }
+
+    function showMessage(text, isError) {
+      $('message').textContent = text;
+      $('message').className = 'status' + (isError ? ' error' : '');
+    }
+
+    function updateApiFormatHint() {
+      const formats = {
+        chat_completions: { placeholder: 'https://api.openai.com/v1', hint: '요청 경로: /chat/completions · 인증: Bearer API 키' },
+        responses: { placeholder: 'https://api.openai.com/v1', hint: '요청 경로: /responses · 인증: Bearer API 키' },
+        claude: { placeholder: 'https://api.anthropic.com/v1', hint: '요청 경로: /messages · 인증: x-api-key 및 Anthropic-Version' }
+      };
+      const selected = formats[$('apiFormat').value] || formats.chat_completions;
+      $('baseUrl').placeholder = selected.placeholder;
+      $('apiFormatHint').textContent = selected.hint;
+    }
+
+    function renderModels() {
+      const selected = $('model').value || data.settings.model || (data.models[0] && data.models[0].id) || '';
+      const models = (data.models || []).slice();
+      if (selected && !models.some((model) => model.id === selected)) models.push({ id: selected, label: selected });
+      $('modelSelect').innerHTML = '<option value="">모델을 선택하세요.</option>' + models.map((model) => '<option value="' + escapeHtml(model.id) + '">' + escapeHtml(model.label) + '</option>').join('');
+      $('modelSelect').value = selected;
+      $('model').value = selected;
+    }
+
+    async function loadModels() {
+      $('refreshModels').disabled = true;
+      try {
+        data.models = await call('listAvailableModels', $('baseUrl').value, $('apiFormat').value);
+        renderModels();
+        showMessage(data.models.length + '개 모델을 불러왔습니다.');
+      } catch (error) {
+        showMessage((error.message || String(error)) + ' 모델 ID를 직접 입력해 사용할 수 있습니다.', true);
+      } finally {
+        $('refreshModels').disabled = false;
+      }
+    }
+
+    function renderAnswerKeys(keys) {
+      $('answerKey').innerHTML = keys.length
+        ? '<option value="">정답지를 선택하세요.</option>' + keys.map((key) => '<option value="' + escapeHtml(key.id) + '">' + escapeHtml(key.name) + '</option>').join('')
+        : '<option value="">접근 가능한 Google Docs가 없습니다.</option>';
+    }
+
+    function renderDriveBrowser(browser, type) {
+      if (!browser) return;
+      const isAssignment = type === 'assignment';
+      const path = $(isAssignment ? 'assignmentPath' : 'answerKeyPath');
+      const folders = $(isAssignment ? 'assignmentFolders' : 'answerKeyFolders');
+      if (isAssignment) data.assignmentBrowser = browser;
+      else data.answerKeyBrowser = browser;
+      path.innerHTML = browser.breadcrumbs.map((crumb) => '<button type="button" data-folder-id="' + escapeHtml(crumb.id) + '">' + escapeHtml(crumb.name) + '</button>').join(' <span class="subtle">›</span> ');
+      path.querySelectorAll('button').forEach((button) => button.addEventListener('click', () => openDriveFolder(button.dataset.folderId, type)));
+      folders.innerHTML = browser.folders.length
+        ? browser.folders.map((folder) => '<button type="button" class="folder-button" data-folder-id="' + escapeHtml(folder.id) + '">' + escapeHtml(folder.name) + '</button>').join('')
+        : '<div class="subtle" style="padding:10px">하위 폴더가 없습니다.</div>';
+      folders.querySelectorAll('button').forEach((button) => button.addEventListener('click', () => openDriveFolder(button.dataset.folderId, type)));
+      if (isAssignment) syncAssignmentFromFolder();
+      else {
+        renderAnswerKeys(browser.files);
+      }
+    }
+
+    async function openDriveFolder(folderId, type) {
+      try { renderDriveBrowser(await call('browseDriveFolder', folderId), type); }
+      catch (error) { showMessage(error.message || String(error), true); }
+    }
+
+    function normalizeName(value) {
+      return String(value || '').toLowerCase().replace(/[^a-z0-9가-힣]+/g, '');
+    }
+
+    function isClassroomRoot_(browser) {
+      const name = normalizeName(browser && (browser.folderName || browser.name));
+      return name === 'classroom' || name === '클래스룸';
+    }
+
+    function isAssignmentFolder_(browser) {
+      const breadcrumbs = browser && browser.breadcrumbs ? browser.breadcrumbs : [];
+      const classroomIndex = breadcrumbs.findIndex((crumb) => isClassroomRoot_(crumb));
+      return classroomIndex >= 0
+        ? breadcrumbs.length > classroomIndex + 2
+        : Boolean(browser && browser.folderId && browser.folderId !== 'root');
+    }
+
+    function syncAssignmentFromFolder() {
+      const folder = data.assignmentBrowser;
+      if (!folder || !isAssignmentFolder_(folder) || isClassroomRoot_(folder)) {
+        data.pendingAssignment = null;
+        data.confirmedAssignmentId = '';
+        $('confirmAssignment').disabled = true;
+        $('assignmentSelection').textContent = 'Classroom 안에서 과제 폴더를 선택하세요.';
+        return;
+      }
+      data.pendingAssignment = { id: folder.folderId, title: folder.folderName };
+      data.confirmedAssignmentId = '';
+      $('confirmAssignment').disabled = false;
+      $('assignmentSelection').textContent = '선택한 과제 폴더: ' + folder.folderName + ' (확정 버튼을 눌러 주세요.)';
+    }
+
+    function renderJobs(jobs) {
+      if (!jobs.length) {
+        $('jobs').innerHTML = '<div class="subtle">작업 없음</div>';
+        return;
+      }
+      $('jobs').innerHTML = jobs.map((job) => {
+        const progress = job.total ? job.completed + '/' + job.total : '제출물 없음';
+        const labels = { WAITING: '예약 대기', QUEUED: '실행 대기', RUNNING: '채점 중', STOPPED: '중단됨', DONE: '완료' };
+        const canDelete = ['WAITING', 'QUEUED', 'STOPPED'].indexOf(job.status) >= 0;
+        return '<div class="job"><div class="job-title">' + escapeHtml(job.assignmentTitle) + '</div><div class="job-meta">' + escapeHtml(job.courseName) + ' · ' + progress + ' · ' + escapeHtml(labels[job.status] || job.status) + '</div><div class="job-meta">정답지: ' + escapeHtml(job.answerKeyName || '정보 없음') + '</div><div class="job-meta">모델: ' + escapeHtml(job.model || '알 수 없음') + '</div>' + (job.errors ? '<div class="job-meta">오류 ' + escapeHtml(job.errors) + '건</div>' : '') + (job.error ? '<div class="job-meta" style="color:#b3261e">' + escapeHtml(job.error) + '</div>' : '') + (canDelete ? '<button type="button" class="secondary delete-job" data-job-id="' + escapeHtml(job.jobId) + '">예약 삭제</button>' : '') + '</div>';
+      }).join('');
+      $('jobs').querySelectorAll('.delete-job').forEach((button) => button.addEventListener('click', deleteJob));
+    }
+
+    async function refreshQueueStatus() {
+      const requestId = ++queueStatusRequestId;
+      const jobs = await call('getQueueStatus');
+      if (requestId === queueStatusRequestId) renderJobs(jobs);
+      return jobs;
+    }
+
+    async function deleteJob(event) {
+      const button = event.currentTarget;
+      if (!confirm('이 예약 작업을 삭제할까요?')) return;
+      button.disabled = true;
+      try {
+        renderJobs(await call('deleteQueuedJob', button.dataset.jobId));
+        showMessage('예약 작업을 삭제했습니다.');
+      } catch (error) {
+        showMessage(error.message || String(error), true);
+        button.disabled = false;
+      }
+    }
+
+    function escapeHtml(value) {
+      return String(value == null ? '' : value).replace(/[&<>'"]/g, (character) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', "'": '&#39;', '"': '&quot;' }[character]));
+    }
+
+    async function load() {
+      try {
+        data = await call('getInitialData');
+        $('apiFormat').value = data.settings.apiFormat || 'chat_completions';
+        $('baseUrl').value = data.settings.baseUrl || '';
+        updateApiFormatHint();
+        renderModels();
+        renderDriveBrowser(data.classroomBrowser, 'assignment');
+        renderDriveBrowser(data.answerKeyBrowser, 'answerKey');
+        renderJobs(data.jobs);
+        $('gradingMode').value = data.settings.gradingMode || 'quantitative';
+        $('maxScore').value = data.settings.maxScore || 100;
+        $('maxOutputTokens').value = data.settings.maxOutputTokens || 65536;
+        $('aiUseDetection').checked = Boolean(data.settings.aiUseDetection);
+        const hasBaseUrl = Boolean(data.settings.baseUrl);
+        const loadMessage = (data.errors && data.errors.length) ? data.errors.join('\n') : (data.hasApiKey && hasBaseUrl ? '설정이 준비되었습니다.' : 'Base URL과 API 키를 입력해 주세요.');
+        showMessage(loadMessage, Boolean(data.errors && data.errors.length) || !data.hasApiKey || !hasBaseUrl);
+      } catch (error) { showMessage(error.message || String(error), true); }
+    }
+
+    $('saveSettings').addEventListener('click', async () => {
+      try {
+        await call('saveSettings', { baseUrl: $('baseUrl').value, apiFormat: $('apiFormat').value, apiKey: $('apiKey').value, model: $('model').value, gradingMode: $('gradingMode').value, maxScore: $('maxScore').value, maxOutputTokens: $('maxOutputTokens').value, aiUseDetection: $('aiUseDetection').checked });
+        $('apiKey').value = ''; showMessage('설정을 저장했습니다.');
+        data.settings.baseUrl = $('baseUrl').value.trim().replace(/\/+$/, '');
+        data.settings.apiFormat = $('apiFormat').value;
+        data.settings.model = $('model').value;
+        renderModels();
+      } catch (error) { showMessage(error.message || String(error), true); }
+    });
+    $('apiFormat').addEventListener('change', updateApiFormatHint);
+    $('refreshModels').addEventListener('click', loadModels);
+    $('modelSelect').addEventListener('change', () => {
+      if ($('modelSelect').value) $('model').value = $('modelSelect').value;
+    });
+    $('model').addEventListener('input', () => {
+      const modelId = $('model').value;
+      $('modelSelect').value = Array.from($('modelSelect').options).some((option) => option.value === modelId) ? modelId : '';
+    });
+    $('confirmAssignment').addEventListener('click', () => {
+      if (!data.pendingAssignment || !data.assignmentBrowser) return;
+      data.confirmedAssignmentId = data.pendingAssignment.id;
+      $('confirmAssignment').disabled = true;
+      $('assignmentSelection').textContent = '확정된 과제: ' + data.pendingAssignment.title;
+      showMessage('과제 폴더를 확정했습니다. 정답지를 선택해 주세요.');
+    });
+    $('start').addEventListener('click', async () => {
+      const selected = data.confirmedAssignmentId;
+      if (!selected) return showMessage('과제 폴더를 선택하고 확정해 주세요.', true);
+      const assignmentFolder = data.assignmentBrowser;
+      if (!assignmentFolder || !assignmentFolder.folderId || assignmentFolder.folderId === 'root') return showMessage('과제 폴더를 선택해 주세요.', true);
+      if (!$('answerKey').value) return showMessage('정답지 Google Docs를 선택해 주세요.', true);
+      $('start').disabled = true; showMessage('제출물 목록을 읽고 예약 큐에 추가하는 중입니다...');
+      try {
+        await call('saveSettings', { baseUrl: $('baseUrl').value, apiFormat: $('apiFormat').value, apiKey: $('apiKey').value, model: $('model').value, gradingMode: $('gradingMode').value, maxScore: $('maxScore').value, maxOutputTokens: $('maxOutputTokens').value, aiUseDetection: $('aiUseDetection').checked });
+        $('apiKey').value = '';
+        const jobs = await call('createJobs', { assignmentFolderId: assignmentFolder.folderId, assignmentFolderName: assignmentFolder.folderName, answerKeyId: $('answerKey').value, baseUrl: $('baseUrl').value, apiFormat: $('apiFormat').value, gradingMode: $('gradingMode').value, maxScore: $('maxScore').value, maxOutputTokens: $('maxOutputTokens').value, aiUseDetection: $('aiUseDetection').checked, model: $('model').value });
+        renderJobs(jobs); showMessage('예약 큐에 추가했습니다. 이 창을 닫아도 예약 작업은 유지됩니다.');
+      } catch (error) { showMessage(error.message || String(error), true); }
+      finally { $('start').disabled = false; }
+    });
+    $('runAll').addEventListener('click', async () => {
+      $('runAll').disabled = true; showMessage('예약 큐의 모든 작업을 실행합니다...');
+      queueStatusRequestId += 1;
+      try {
+        const jobs = await call('runAllQueuedJobs');
+        queueStatusRequestId += 1;
+        renderJobs(jobs);
+        showMessage('예약 큐 전체 실행을 시작했습니다.');
+      } catch (error) { showMessage(error.message || String(error), true); }
+      finally { $('runAll').disabled = false; }
+    });
+    $('refreshJobs').addEventListener('click', async () => {
+      $('refreshJobs').disabled = true;
+      showMessage('예약 큐 상태를 새로고침합니다...');
+      try {
+        await refreshQueueStatus();
+        showMessage('예약 큐 상태를 새로고침했습니다.');
+      } catch (error) { showMessage(error.message || String(error), true); }
+      finally { $('refreshJobs').disabled = false; }
+    });
+    setInterval(async () => { try { await refreshQueueStatus(); } catch (ignored) {} }, 10000);
+    load();
+  </script>
+</body>
+</html>
