@@ -5,7 +5,7 @@ Google Apps Script 기반의 AI 자동 채점 도구입니다. Google Classroom 
 ## 기능
 
 - **Google Classroom 연동**: Classroom 과제 제출물 자동 수집
-- **다중 AI API 지원**: OpenAI Chat Completions, OpenAI Responses, Claude Messages API 지원
+- **다중 AI API 지원**: OpenAI Chat Completions, OpenAI Responses, Claude Messages, Gemini generateContent 지원
 - **스프레드시트 기반 관리**: Google 스프레드시트에서 채점 큐, 제출물, 결과를 관리
 - **자동 큐 처리**: 설정한 간격으로 채점 큐를 자동 처리
 - **재시도 메커니즘**: API 호출 실패 시 자동 재시도

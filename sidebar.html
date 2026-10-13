@@ -48,6 +48,7 @@
       <option value="chat_completions">OpenAI 호환 · Chat Completions</option>
       <option value="responses">OpenAI · Responses</option>
       <option value="claude">Claude · Messages</option>
+      <option value="gemini">Gemini · generateContent</option>
     </select>
     <label for="baseUrl">Base URL</label>
     <input id="baseUrl" type="url" placeholder="https://api.example.com/v1">
@@ -63,6 +64,7 @@
     <input id="model" type="text" placeholder="모델 ID">
     <div class="subtle">API 오류 코드는 10분 간격으로 재시도합니다. 크레딧 부족 또는 소진 응답이면 중단합니다.</div>
     <button class="secondary" id="saveSettings">설정 저장</button>
+    <button class="secondary" id="testConnection">연결 테스트</button>
   </div>
 
   <div class="section">
@@ -108,6 +110,12 @@
     const $ = (id) => document.getElementById(id);
     let data = { pendingAssignment: null, confirmedAssignmentId: '', models: [], settings: {}, assignmentBrowser: null, answerKeyBrowser: null };
     let queueStatusRequestId = 0;
+    let modelCache = {};
+    const FIXED_BASE_URLS = {
+      responses: 'https://api.openai.com/v1',
+      claude: 'https://api.anthropic.com/v1',
+      gemini: 'https://generativelanguage.googleapis.com/v1beta'
+    };
 
     function call(name, ...args) {
       return new Promise((resolve, reject) => {
@@ -123,19 +131,32 @@
     function updateApiFormatHint() {
       const formats = {
         chat_completions: { placeholder: 'https://api.openai.com/v1', hint: '요청 경로: /chat/completions · 인증: Bearer API 키' },
-        responses: { placeholder: 'https://api.openai.com/v1', hint: '요청 경로: /responses · 인증: Bearer API 키' },
-        claude: { placeholder: 'https://api.anthropic.com/v1', hint: '요청 경로: /messages · 인증: x-api-key 및 Anthropic-Version' }
+        responses: { placeholder: 'https://api.openai.com/v1', hint: '요청 경로: /responses · 인증: Bearer API 키 · Base URL 자동 입력(수정 가능)' },
+        claude: { placeholder: 'https://api.anthropic.com/v1', hint: '요청 경로: /messages · 인증: x-api-key 및 Anthropic-Version · Base URL 자동 입력(수정 가능)' },
+        gemini: { placeholder: 'https://generativelanguage.googleapis.com/v1beta', hint: '요청 경로: /models/{모델}:generateContent · 인증: x-goog-api-key · Base URL 자동 입력(수정 가능)' }
       };
       const selected = formats[$('apiFormat').value] || formats.chat_completions;
       $('baseUrl').placeholder = selected.placeholder;
       $('apiFormatHint').textContent = selected.hint;
     }
 
+    function applyApiFormatSideEffects() {
+      updateApiFormatHint();
+      const format = $('apiFormat').value;
+      const fixed = FIXED_BASE_URLS[format] || '';
+      const current = $('baseUrl').value.trim().replace(/\/+$/, '');
+      const known = Object.keys(FIXED_BASE_URLS).map((key) => FIXED_BASE_URLS[key].toLowerCase());
+      if (fixed && (!current || known.indexOf(current.toLowerCase()) >= 0)) {
+        $('baseUrl').value = fixed;
+      }
+      data.models = modelCache[format] || [];
+      renderModels();
+    }
+
     function renderModels() {
       const selected = $('model').value || data.settings.model || (data.models[0] && data.models[0].id) || '';
       const models = (data.models || []).slice();
-      if (selected && !models.some((model) => model.id === selected)) models.push({ id: selected, label: selected });
-      $('modelSelect').innerHTML = '<option value="">모델을 선택하세요.</option>' + models.map((model) => '<option value="' + escapeHtml(model.id) + '">' + escapeHtml(model.label) + '</option>').join('');
+      $('modelSelect').innerHTML = '<option value="">모델을 선택하세요.</option>' + models.map((model) => '<option value="' + escapeHtml(model.id) + '">' + escapeHtml(model.id) + '</option>').join('');
       $('modelSelect').value = selected;
       $('model').value = selected;
     }
@@ -144,6 +165,7 @@
       $('refreshModels').disabled = true;
       try {
         data.models = await call('listAvailableModels', $('baseUrl').value, $('apiFormat').value);
+        modelCache[$('apiFormat').value] = data.models;
         renderModels();
         showMessage(data.models.length + '개 모델을 불러왔습니다.');
       } catch (error) {
@@ -258,8 +280,7 @@
         data = await call('getInitialData');
         $('apiFormat').value = data.settings.apiFormat || 'chat_completions';
         $('baseUrl').value = data.settings.baseUrl || '';
-        updateApiFormatHint();
-        renderModels();
+        applyApiFormatSideEffects();
         renderDriveBrowser(data.classroomBrowser, 'assignment');
         renderDriveBrowser(data.answerKeyBrowser, 'answerKey');
         renderJobs(data.jobs);
@@ -283,8 +304,17 @@
         renderModels();
       } catch (error) { showMessage(error.message || String(error), true); }
     });
-    $('apiFormat').addEventListener('change', updateApiFormatHint);
+    $('apiFormat').addEventListener('change', applyApiFormatSideEffects);
     $('refreshModels').addEventListener('click', loadModels);
+    $('testConnection').addEventListener('click', async () => {
+      $('testConnection').disabled = true;
+      showMessage('연결 테스트 중...');
+      try {
+        const result = await call('testProviderConnection', $('baseUrl').value, $('apiFormat').value, $('model').value);
+        showMessage((result.ok ? '연결 성공' : '연결 실패') + ' (' + result.status + ')\n요청: ' + result.url + '\n응답: ' + (result.snippet || '(빈 응답)'), !result.ok);
+      } catch (error) { showMessage(error.message || String(error), true); }
+      finally { $('testConnection').disabled = false; }
+    });
     $('modelSelect').addEventListener('change', () => {
       if ($('modelSelect').value) $('model').value = $('modelSelect').value;
     });

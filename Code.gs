@@ -11,9 +11,7 @@ const APP = {
   retrySubmissionBatchSize: 13,
   defaultMaxOutputTokens: 65536,
   maxOutputTokens: 65536,
-  models: [
-    { id: 'gpt-4o-mini', label: 'gpt-4o-mini' }
-  ]
+  models: []
 };
 function onOpen() {
   SpreadsheetApp.getUi()
@@ -119,10 +117,13 @@ function getInitialData() {
 
 function saveSettings(settings) {
   const currentSettings = getSettings_();
+  const apiFormat = normalizeApiFormat_(settings.apiFormat);
+  const baseUrl = normalizeBaseUrl_(settings.baseUrl);
+  assertCompatibleBaseUrl_(baseUrl, apiFormat);
   const normalized = {
-    baseUrl: normalizeBaseUrl_(settings.baseUrl),
-    apiFormat: normalizeApiFormat_(settings.apiFormat),
-    model: String(settings.model || '').trim() || currentSettings.model || APP.models[0].id,
+    baseUrl: baseUrl,
+    apiFormat: apiFormat,
+    model: String(settings.model || '').trim() || currentSettings.model || '',
     gradingMode: settings.gradingMode === 'all' ? 'all' : 'quantitative',
     maxScore: normalizeMaxScore_(settings.maxScore),
     maxOutputTokens: normalizeOutputTokens_(settings.maxOutputTokens),
@@ -148,7 +149,10 @@ function listAvailableModels(baseUrl, apiFormat) {
   const status = response.getResponseCode();
   const body = response.getContentText();
   if (status < 200 || status >= 300) {
-    throw new Error('모델 목록 조회 실패 (' + status + '). 모델 ID를 직접 입력할 수 있습니다. ' + body.slice(0, 300));
+    const keyHint = (selectedFormat === 'gemini' && status >= 400 && status < 500)
+      ? ' API 키가 Generative Language API용인지, 키의 애플리케이션 제한(HTTP 리퍼러 등)이 서버 호출을 막지 않는지 확인해 주세요.'
+      : '';
+    throw new Error('모델 목록 조회 실패 (' + status + '). 모델 ID를 직접 입력할 수 있습니다.' + keyHint + ' ' + body.slice(0, 300));
   }
   let parsed;
   try {
@@ -156,17 +160,80 @@ function listAvailableModels(baseUrl, apiFormat) {
   } catch (error) {
     throw new Error('모델 목록 응답을 JSON으로 읽을 수 없습니다. 모델 ID를 직접 입력해 주세요.');
   }
-  const models = (parsed.data || []).map(function(model) {
-    const id = String(model.id || '');
-    return id ? { id: id, label: String(model.display_name || model.name || id) } : null;
-  }).filter(function(model) { return model; });
+  const models = parseModelsResponse_(parsed, selectedFormat);
   if (!models.length) throw new Error('사용 가능한 모델 목록이 비어 있습니다. 모델 ID를 직접 입력해 주세요.');
   return models.sort(function(a, b) { return a.id.localeCompare(b.id); });
+}
+
+function parseModelsResponse_(parsed, apiFormat) {
+  const format = normalizeApiFormat_(apiFormat);
+  if (format === 'gemini') {
+    const items = parsed.models || [];
+    const capable = items.filter(function(model) {
+      const methods = model.supportedGenerationMethods || model.supported_generation_methods || [];
+      return methods.indexOf('generateContent') >= 0;
+    });
+    const source = capable.length ? capable : items;
+    const mapped = source.map(function(model) {
+      const rawName = String(model.name || '');
+      const id = rawName.replace(/^models\//, '');
+      if (!id) return null;
+      return { id: id, label: id };
+    }).filter(function(model) { return model; });
+    return mapped;
+  }
+  return (parsed.data || []).map(function(model) {
+    const id = String(model.id || '');
+    return id ? { id: id, label: id } : null;
+  }).filter(function(model) { return model; });
 }
 
 function getApiKey_() {
   const properties = PropertiesService.getUserProperties();
   return String(properties.getProperty('OPENAI_COMPATIBLE_API_KEY') || properties.getProperty('XKIRO_API_KEY') || '').trim();
+}
+
+function testProviderConnection(baseUrl, apiFormat, model) {
+  const apiKey = getApiKey_();
+  if (!apiKey) throw new Error('API 키를 먼저 저장해 주세요.');
+  const settings = getSettings_();
+  const format = normalizeApiFormat_(apiFormat || settings.apiFormat);
+  const root = normalizeBaseUrl_(baseUrl || settings.baseUrl);
+  if (!root) throw new Error('API Base URL을 입력해 주세요.');
+  assertCompatibleBaseUrl_(root, format);
+  if (format === 'gemini') {
+    const targetModel = String(model || settings.model || 'gemini-2.0-flash').trim();
+    const url = getProviderRequestUrl_(root, format, targetModel);
+    const response = UrlFetchApp.fetch(url, {
+      method: 'post',
+      contentType: 'application/json',
+      headers: getProviderHeaders_(format, apiKey),
+      payload: JSON.stringify({
+        contents: [{ role: 'user', parts: [{ text: 'ping' }] }],
+        generationConfig: { maxOutputTokens: 16 }
+      }),
+      muteHttpExceptions: true
+    });
+    return buildConnectionReport_(url, response);
+  }
+  const url = getModelsUrl_(root);
+  const response = UrlFetchApp.fetch(url, {
+    method: 'get',
+    headers: getProviderHeaders_(format, apiKey),
+    muteHttpExceptions: true
+  });
+  return buildConnectionReport_(url, response);
+}
+
+function buildConnectionReport_(url, response) {
+  const status = response.getResponseCode();
+  const body = response.getContentText() || '';
+  return {
+    ok: status >= 200 && status < 300,
+    url: url,
+    status: status,
+    snippet: body.slice(0, 500)
+  };
 }
 
 function browseClassroomRootFolder_() {
@@ -364,6 +431,7 @@ function createJobs(request) {
   const baseUrl = normalizeBaseUrl_(request.baseUrl || settings.baseUrl);
   if (!baseUrl) throw new Error('API Base URL을 입력해 주세요.');
   const apiFormat = normalizeApiFormat_(request.apiFormat || settings.apiFormat);
+  assertCompatibleBaseUrl_(baseUrl, apiFormat);
   const answerKey = getDriveDocMeta_(request.answerKeyId);
   const assignmentFolder = browseDriveFolder(request.assignmentFolderId);
   const mode = request.gradingMode === 'all' ? 'all' : 'quantitative';
@@ -372,7 +440,8 @@ function createJobs(request) {
   const aiUseDetection = request.aiUseDetection === undefined
     ? settings.aiUseDetection
     : toBoolean_(request.aiUseDetection);
-  const model = String(request.model || settings.model || APP.models[0].id);
+  const model = String(request.model || settings.model || '').trim();
+  if (!model) throw new Error('모델을 선택하거나 직접 입력해 주세요.');
   const courseName = String(request.courseName || getClassFolderName_(assignmentFolder.breadcrumbs) || 'Classroom');
   const assignmentTitle = String(request.assignmentFolderName || assignmentFolder.folderName || '과제');
   const submissions = listFolderSubmissions_(request.assignmentFolderId);
@@ -735,15 +804,17 @@ function normalizeBaseUrl_(value) {
 }
 
 function normalizeApiFormat_(value) {
-  return ['responses', 'claude'].indexOf(String(value || '').toLowerCase()) >= 0
-    ? String(value).toLowerCase()
+  const normalized = String(value || '').toLowerCase();
+  if (normalized === 'antigravity') return 'gemini';
+  return ['responses', 'claude', 'gemini'].indexOf(normalized) >= 0
+    ? normalized
     : 'chat_completions';
 }
 
 function getProviderApiRoot_(baseUrl) {
   const normalized = normalizeBaseUrl_(baseUrl);
   if (!normalized) throw new Error('API Base URL을 입력해 주세요.');
-  return normalized.replace(/\/(?:chat\/completions|responses|messages|models)$/i, '');
+  return normalized.replace(/\/(?:chat\/completions|responses|messages|models(?:\/.*)?)$/i, '');
 }
 
 function getModelsUrl_(baseUrl) {
@@ -751,19 +822,37 @@ function getModelsUrl_(baseUrl) {
   return /\/models$/i.test(apiRoot) ? apiRoot : apiRoot + '/models';
 }
 
-function getProviderRequestUrl_(baseUrl, apiFormat) {
+function getProviderRequestUrl_(baseUrl, apiFormat, model) {
   const apiRoot = getProviderApiRoot_(baseUrl);
-  const endpoint = normalizeApiFormat_(apiFormat) === 'responses'
+  const format = normalizeApiFormat_(apiFormat);
+  if (format === 'gemini') {
+    if (!model) throw new Error('Gemini 모델 ID를 입력해 주세요.');
+    return apiRoot + '/models/' + encodeURIComponent(String(model)) + ':generateContent';
+  }
+  const endpoint = format === 'responses'
     ? 'responses'
-    : (normalizeApiFormat_(apiFormat) === 'claude' ? 'messages' : 'chat/completions');
+    : (format === 'claude' ? 'messages' : 'chat/completions');
   return apiRoot + '/' + endpoint;
 }
 
 function getProviderHeaders_(apiFormat, apiKey) {
-  if (normalizeApiFormat_(apiFormat) === 'claude') {
+  const format = normalizeApiFormat_(apiFormat);
+  if (format === 'claude') {
     return { 'x-api-key': apiKey, 'anthropic-version': '2023-06-01' };
   }
+  if (format === 'gemini') {
+    return { 'x-goog-api-key': apiKey };
+  }
   return { Authorization: 'Bearer ' + apiKey };
+}
+
+function assertCompatibleBaseUrl_(baseUrl, apiFormat) {
+  const format = normalizeApiFormat_(apiFormat);
+  if (format !== 'gemini') return;
+  const root = getProviderApiRoot_(baseUrl).toLowerCase();
+  if (root.indexOf('generativelanguage.googleapis.com') < 0) {
+    throw new Error('Gemini 규격의 Base URL은 https://generativelanguage.googleapis.com/v1beta 여야 합니다. 현재값: ' + baseUrl);
+  }
 }
 
 function gradeAssignmentWithApi_(job, answerKeyText, documents) {
@@ -774,7 +863,12 @@ function gradeAssignmentWithApi_(job, answerKeyText, documents) {
     throw error;
   }
   const baseUrl = normalizeBaseUrl_(job.baseUrl || getSettings_().baseUrl);
-  const model = String(job.model || APP.models[0].id);
+  const model = String(job.model || '').trim();
+  if (!model) {
+    const error = new Error('모델 ID가 비어 있습니다. 작업을 다시 등록할 때 모델을 선택하거나 직접 입력해 주세요.');
+    error.isPermanentProviderError = true;
+    throw error;
+  }
   const gradingRule = job.gradingMode === 'all'
     ? '정량평가 점수와 정성평가 점수를 모두 반영해 finalScore를 계산한다.'
     : '빈칸, 객관식, 단답형 등 정량적으로 판정 가능한 문항만 점수에 반영한다. 정성평가는 0점으로 두고 참고 피드백만 작성한다.';
@@ -826,6 +920,16 @@ function gradeAssignmentWithApi_(job, answerKeyText, documents) {
       max_tokens: outputTokens,
       temperature: 0.1
     };
+  } else if (apiFormat === 'gemini') {
+    payload = {
+      system_instruction: { parts: [{ text: systemInstruction }] },
+      contents: [{ role: 'user', parts: [{ text: prompt }] }],
+      generationConfig: {
+        temperature: 0.1,
+        maxOutputTokens: outputTokens,
+        responseMimeType: 'application/json'
+      }
+    };
   } else {
     payload = {
       model: model,
@@ -838,8 +942,9 @@ function gradeAssignmentWithApi_(job, answerKeyText, documents) {
     };
   }
   let response;
+  const requestUrl = getProviderRequestUrl_(baseUrl, apiFormat, model);
   try {
-    response = UrlFetchApp.fetch(getProviderRequestUrl_(baseUrl, apiFormat), {
+    response = UrlFetchApp.fetch(requestUrl, {
       method: 'post',
       contentType: 'application/json',
       headers: getProviderHeaders_(apiFormat, apiKey),
@@ -853,11 +958,7 @@ function gradeAssignmentWithApi_(job, answerKeyText, documents) {
   const status = response.getResponseCode();
   const body = response.getContentText();
   if (status < 200 || status >= 300) {
-    const error = new Error('API 오류 (' + status + '): ' + body.slice(0, 500));
-    error.isCreditExhausted = isCreditExhaustion_(status, body);
-    error.isRetryableProviderError = !error.isCreditExhausted && isRetryableProviderStatus_(status);
-    error.isPermanentProviderError = !error.isRetryableProviderError;
-    throw error;
+    throw mapProviderError_(status, body, apiFormat, requestUrl);
   }
   let parsed;
   try {
@@ -895,12 +996,46 @@ function extractProviderResponseText_(parsed, apiFormat) {
   if (format === 'responses' && typeof parsed.output_text === 'string' && parsed.output_text.trim()) {
     return parsed.output_text.trim();
   }
+  if (format === 'gemini') {
+    const candidates = parsed.candidates || [];
+    const texts = [];
+    candidates.forEach(function(candidate) {
+      const parts = ((candidate.content || {}).parts || []);
+      parts.forEach(function(part) {
+        if (part && typeof part.text === 'string' && part.text) texts.push(part.text);
+      });
+    });
+    if (texts.length) return texts.join('').trim();
+    if (typeof parsed.output_text === 'string') return parsed.output_text.trim();
+    return '';
+  }
   const blocks = format === 'responses'
     ? (parsed.output || []).reduce(function(all, item) { return all.concat(item.content || []); }, [])
     : (parsed.content || []);
   return blocks.map(function(block) {
     return block && typeof block.text === 'string' ? block.text : '';
   }).filter(function(text) { return text; }).join('').trim();
+}
+
+function mapProviderError_(status, body, apiFormat, contextUrl) {
+  const format = normalizeApiFormat_(apiFormat);
+  const snippet = String(body || '').slice(0, 500);
+  let hint = '';
+  if (Number(status) === 404 && format === 'gemini') {
+    hint = ' Base URL이 https://generativelanguage.googleapis.com/v1beta 인지, 과제를 등록할 때 저장된 baseUrl이 최신 설정인지 확인해 주세요 (작업 생성 후 설정을 바꿔도 기존 작업의 URL은 그대로입니다).';
+  }
+  const where = contextUrl ? ' [요청: ' + String(contextUrl) + ']' : '';
+  const error = new Error('API 오류 (' + status + '): ' + snippet + where + hint);
+  if (format === 'gemini' && Number(status) === 429) {
+    error.isCreditExhausted = false;
+    error.isRetryableProviderError = true;
+    error.isPermanentProviderError = false;
+    return error;
+  }
+  error.isCreditExhausted = isCreditExhaustion_(status, body);
+  error.isRetryableProviderError = !error.isCreditExhausted && isRetryableProviderStatus_(status);
+  error.isPermanentProviderError = !error.isRetryableProviderError;
+  return error;
 }
 
 function listFolderSubmissions_(folderId) {
@@ -1023,20 +1158,20 @@ function removeQueueTriggers_() {
 
 function getSettings_() {
   const raw = PropertiesService.getUserProperties().getProperty(APP.settingsKey);
-  if (!raw) return { baseUrl: '', apiFormat: 'chat_completions', model: APP.models[0].id, gradingMode: 'quantitative', maxScore: 100, maxOutputTokens: APP.defaultMaxOutputTokens, aiUseDetection: false };
+  if (!raw) return { baseUrl: '', apiFormat: 'chat_completions', model: '', gradingMode: 'quantitative', maxScore: 100, maxOutputTokens: APP.defaultMaxOutputTokens, aiUseDetection: false };
   try {
     const value = JSON.parse(raw);
     return {
       baseUrl: normalizeBaseUrl_(value.baseUrl),
       apiFormat: normalizeApiFormat_(value.apiFormat),
-      model: String(value.model || APP.models[0].id).trim() || APP.models[0].id,
+      model: String(value.model || '').trim(),
       gradingMode: value.gradingMode === 'all' ? 'all' : 'quantitative',
       maxScore: normalizeMaxScore_(value.maxScore),
       maxOutputTokens: normalizeOutputTokens_(value.maxOutputTokens || APP.defaultMaxOutputTokens),
       aiUseDetection: toBoolean_(value.aiUseDetection)
     };
   } catch (ignored) {
-    return { baseUrl: '', apiFormat: 'chat_completions', model: APP.models[0].id, gradingMode: 'quantitative', maxScore: 100, maxOutputTokens: APP.defaultMaxOutputTokens, aiUseDetection: false };
+    return { baseUrl: '', apiFormat: 'chat_completions', model: '', gradingMode: 'quantitative', maxScore: 100, maxOutputTokens: APP.defaultMaxOutputTokens, aiUseDetection: false };
   }
 }
 
