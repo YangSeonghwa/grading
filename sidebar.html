@@ -43,6 +43,12 @@
 
   <div class="section">
     <h2>API 설정</h2>
+    <label for="profileSelect">제공업체 (시트)</label>
+    <div class="row model-row">
+      <select id="profileSelect"><option value="">직접 입력</option></select>
+      <button type="button" class="secondary" id="setupProfiles">시트 만들기/새로고침</button>
+    </div>
+    <div class="subtle">제공업체를 고르면 규격·주소·모델이 채워지고 시트의 키를 사용합니다. 시트를 고친 뒤에는 새로고침 버튼을 눌러 주세요. 키를 직접 입력하면 직접 입력이 우선합니다.</div>
     <label for="apiFormat">API 규격</label>
     <select id="apiFormat">
       <option value="chat_completions">OpenAI 호환 · Chat Completions</option>
@@ -55,6 +61,7 @@
     <div id="apiFormatHint" class="subtle"></div>
     <label for="apiKey">API 키</label>
     <input id="apiKey" type="password" placeholder="API 키를 입력하세요. 저장된 키는 다시 표시하지 않습니다.">
+    <div id="apiKeyStatus" class="subtle">키 상태 확인 중...</div>
     <label for="modelSelect">모델 선택</label>
     <div class="row model-row">
       <select id="modelSelect"><option value="">모델 목록을 불러오세요.</option></select>
@@ -94,7 +101,7 @@
     </div>
     <div class="subtle">전체 제출물을 먼저 한 번에 채점합니다. JSON 오류 시 13명 이하 묶음으로 재시도합니다.</div>
     <label><input id="aiUseDetection" type="checkbox"> 정성평가 문장의 AI 사용 의심 분석 포함</label>
-    <div class="subtle">확정 판정이 아닌 참고용 신호이며, 의심 수준과 근거 문장을 결과 시트에 기록합니다.</div>
+    <div class="subtle">신호별 원문 근거를 인용하는 참고용 신호이며, 의심 수준과 근거 문장을 결과 시트에 기록합니다. 70 이상 high, 30~69 medium으로 판정됩니다.</div>
     <button id="start">예약 큐에 추가</button>
     <div id="message" class="status">준비 중...</div>
   </div>
@@ -111,6 +118,7 @@
     let data = { pendingAssignment: null, confirmedAssignmentId: '', models: [], settings: {}, assignmentBrowser: null, answerKeyBrowser: null };
     let queueStatusRequestId = 0;
     let modelCache = {};
+    let useSheetProfile = '';
     const FIXED_BASE_URLS = {
       responses: 'https://api.openai.com/v1',
       claude: 'https://api.anthropic.com/v1',
@@ -164,7 +172,7 @@
     async function loadModels() {
       $('refreshModels').disabled = true;
       try {
-        data.models = await call('listAvailableModels', $('baseUrl').value, $('apiFormat').value);
+        data.models = await call('listAvailableModels', $('baseUrl').value, $('apiFormat').value, effectiveProfile());
         modelCache[$('apiFormat').value] = data.models;
         renderModels();
         showMessage(data.models.length + '개 모델을 불러왔습니다.');
@@ -173,6 +181,81 @@
       } finally {
         $('refreshModels').disabled = false;
       }
+    }
+
+    async function refreshKeyStatus() {
+      try {
+        const status = await call('getApiKeyStatus');
+        if (status && status.hasKey) {
+          const parts = ['API 키: 저장됨'];
+          if (status.suffix) parts.push('끝 4자리 ' + status.suffix);
+          if (status.updatedAt) {
+            const savedAt = new Date(status.updatedAt);
+            parts.push(isNaN(savedAt.getTime()) ? status.updatedAt : savedAt.toLocaleString());
+          }
+          $('apiKeyStatus').textContent = parts.join(' · ');
+        } else {
+          $('apiKeyStatus').textContent = 'API 키: 미저장 — 키를 입력하고 설정 저장을 눌러 주세요.';
+        }
+      } catch (error) {
+        $('apiKeyStatus').textContent = 'API 키 상태를 확인하지 못했습니다.';
+      }
+    }
+
+    function effectiveProfile() {
+      return $('apiKey').value.trim() ? '' : (useSheetProfile || '');
+    }
+
+    function findProfile(name) {
+      return (data.profiles || []).filter((profile) => profile.name === name)[0] || null;
+    }
+
+    function showProfileKeyStatus(profile) {
+      $('apiKeyStatus').textContent = '제공업체 "' + profile.name + '"의 시트 키 사용: ' + (profile.hasKey ? '있음' : '없음 — 시트에 입력해 주세요.');
+    }
+
+    async function updateKeyStatusDisplay() {
+      const name = effectiveProfile();
+      if (name) {
+        const profile = findProfile(name);
+        if (profile) {
+          showProfileKeyStatus(profile);
+          return;
+        }
+        useSheetProfile = '';
+      }
+      await refreshKeyStatus();
+    }
+
+    async function loadProfiles() {
+      try {
+        data.profiles = await call('getProfiles');
+      } catch (error) {
+        data.profiles = [];
+        renderProfiles();
+        showMessage('제공업체 목록을 불러오지 못했습니다: ' + (error.message || error), true);
+        return;
+      }
+      renderProfiles();
+    }
+
+    function renderProfiles() {
+      const list = data.profiles || [];
+      if (useSheetProfile && !findProfile(useSheetProfile)) useSheetProfile = '';
+      $('profileSelect').innerHTML = '<option value="">직접 입력</option>' + list.map((profile) => '<option value="' + escapeHtml(profile.name) + '">' + escapeHtml(profile.name) + ' (' + escapeHtml(profile.apiFormat) + ')</option>').join('');
+      $('profileSelect').value = useSheetProfile;
+    }
+
+    function applyProfile(name) {
+      const profile = findProfile(name);
+      if (!profile) return;
+      useSheetProfile = name;
+      $('apiFormat').value = profile.apiFormat;
+      $('baseUrl').value = profile.baseUrl || '';
+      $('model').value = profile.model || '';
+      data.settings.profileName = name;
+      applyApiFormatSideEffects();
+      showProfileKeyStatus(profile);
     }
 
     function renderAnswerKeys(keys) {
@@ -278,9 +361,12 @@
     async function load() {
       try {
         data = await call('getInitialData');
+        useSheetProfile = data.settings.profileName || '';
         $('apiFormat').value = data.settings.apiFormat || 'chat_completions';
         $('baseUrl').value = data.settings.baseUrl || '';
         applyApiFormatSideEffects();
+        await loadProfiles();
+        await updateKeyStatusDisplay();
         renderDriveBrowser(data.classroomBrowser, 'assignment');
         renderDriveBrowser(data.answerKeyBrowser, 'answerKey');
         renderJobs(data.jobs);
@@ -296,13 +382,46 @@
 
     $('saveSettings').addEventListener('click', async () => {
       try {
-        await call('saveSettings', { baseUrl: $('baseUrl').value, apiFormat: $('apiFormat').value, apiKey: $('apiKey').value, model: $('model').value, gradingMode: $('gradingMode').value, maxScore: $('maxScore').value, maxOutputTokens: $('maxOutputTokens').value, aiUseDetection: $('aiUseDetection').checked });
+        const activeProfile = effectiveProfile();
+        await call('saveSettings', { baseUrl: $('baseUrl').value, apiFormat: $('apiFormat').value, apiKey: $('apiKey').value, model: $('model').value, profileName: activeProfile, gradingMode: $('gradingMode').value, maxScore: $('maxScore').value, maxOutputTokens: $('maxOutputTokens').value, aiUseDetection: $('aiUseDetection').checked });
         $('apiKey').value = ''; showMessage('설정을 저장했습니다.');
+        await updateKeyStatusDisplay();
         data.settings.baseUrl = $('baseUrl').value.trim().replace(/\/+$/, '');
         data.settings.apiFormat = $('apiFormat').value;
         data.settings.model = $('model').value;
+        data.settings.profileName = activeProfile;
         renderModels();
       } catch (error) { showMessage(error.message || String(error), true); }
+    });
+    $('profileSelect').addEventListener('change', () => {
+      const name = $('profileSelect').value;
+      if (!name) {
+        useSheetProfile = '';
+        data.settings.profileName = '';
+        refreshKeyStatus();
+        return;
+      }
+      applyProfile(name);
+    });
+    $('apiKey').addEventListener('input', () => {
+      if ($('apiKey').value.trim()) {
+        $('profileSelect').value = '';
+        useSheetProfile = '';
+        refreshKeyStatus();
+      } else if ($('profileSelect').value) {
+        useSheetProfile = $('profileSelect').value;
+        const profile = findProfile(useSheetProfile);
+        if (profile) showProfileKeyStatus(profile);
+      }
+    });
+    $('setupProfiles').addEventListener('click', async () => {
+      $('setupProfiles').disabled = true;
+      try {
+        data.profiles = await call('setupProfilesSheet');
+        renderProfiles();
+        showMessage('제공업체 시트(AI채점_설정)를 준비했습니다. 제공업체·규격(드롭다운)·키·모델을 입력한 뒤 목록에서 선택해 주세요. Base URL이 비면 규격 기본값이 쓰입니다.');
+      } catch (error) { showMessage(error.message || String(error), true); }
+      finally { $('setupProfiles').disabled = false; }
     });
     $('apiFormat').addEventListener('change', applyApiFormatSideEffects);
     $('refreshModels').addEventListener('click', loadModels);
@@ -310,7 +429,7 @@
       $('testConnection').disabled = true;
       showMessage('연결 테스트 중...');
       try {
-        const result = await call('testProviderConnection', $('baseUrl').value, $('apiFormat').value, $('model').value);
+        const result = await call('testProviderConnection', $('baseUrl').value, $('apiFormat').value, $('model').value, effectiveProfile());
         showMessage((result.ok ? '연결 성공' : '연결 실패') + ' (' + result.status + ')\n요청: ' + result.url + '\n응답: ' + (result.snippet || '(빈 응답)'), !result.ok);
       } catch (error) { showMessage(error.message || String(error), true); }
       finally { $('testConnection').disabled = false; }
@@ -337,9 +456,10 @@
       if (!$('answerKey').value) return showMessage('정답지 Google Docs를 선택해 주세요.', true);
       $('start').disabled = true; showMessage('제출물 목록을 읽고 예약 큐에 추가하는 중입니다...');
       try {
-        await call('saveSettings', { baseUrl: $('baseUrl').value, apiFormat: $('apiFormat').value, apiKey: $('apiKey').value, model: $('model').value, gradingMode: $('gradingMode').value, maxScore: $('maxScore').value, maxOutputTokens: $('maxOutputTokens').value, aiUseDetection: $('aiUseDetection').checked });
+        const activeProfile = effectiveProfile();
+        await call('saveSettings', { baseUrl: $('baseUrl').value, apiFormat: $('apiFormat').value, apiKey: $('apiKey').value, model: $('model').value, profileName: activeProfile, gradingMode: $('gradingMode').value, maxScore: $('maxScore').value, maxOutputTokens: $('maxOutputTokens').value, aiUseDetection: $('aiUseDetection').checked });
         $('apiKey').value = '';
-        const jobs = await call('createJobs', { assignmentFolderId: assignmentFolder.folderId, assignmentFolderName: assignmentFolder.folderName, answerKeyId: $('answerKey').value, baseUrl: $('baseUrl').value, apiFormat: $('apiFormat').value, gradingMode: $('gradingMode').value, maxScore: $('maxScore').value, maxOutputTokens: $('maxOutputTokens').value, aiUseDetection: $('aiUseDetection').checked, model: $('model').value });
+        const jobs = await call('createJobs', { assignmentFolderId: assignmentFolder.folderId, assignmentFolderName: assignmentFolder.folderName, answerKeyId: $('answerKey').value, baseUrl: $('baseUrl').value, apiFormat: $('apiFormat').value, profileName: activeProfile, gradingMode: $('gradingMode').value, maxScore: $('maxScore').value, maxOutputTokens: $('maxOutputTokens').value, aiUseDetection: $('aiUseDetection').checked, model: $('model').value });
         renderJobs(jobs); showMessage('예약 큐에 추가했습니다. 이 창을 닫아도 예약 작업은 유지됩니다.');
       } catch (error) { showMessage(error.message || String(error), true); }
       finally { $('start').disabled = false; }

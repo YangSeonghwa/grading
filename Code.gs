@@ -2,6 +2,7 @@ const APP = {
   queueSheet: 'AI채점_작업',
   submissionsSheet: 'AI채점_제출물',
   resultsSheet: 'AI채점_결과',
+  profilesSheet: 'AI채점_설정',
   settingsKey: 'AI_GRADING_SETTINGS',
   triggerHandler: 'processQueue',
   providerCooldownProperty: 'AI_GRADING_PROVIDER_RETRY_AT',
@@ -104,9 +105,16 @@ function getInitialData() {
   } catch (error) {
     errors.push('정답지 폴더 조회 실패: ' + String(error.message || error));
   }
+  let profiles = [];
+  try {
+    profiles = getProfiles();
+  } catch (error) {
+    errors.push('제공업체 시트 조회 실패: ' + String(error.message || error));
+  }
   return {
     hasApiKey: Boolean(apiKey),
     settings: settings,
+    profiles: profiles,
     models: APP.models,
     classroomBrowser: classroomBrowser,
     answerKeyBrowser: answerKeyBrowser,
@@ -124,22 +132,25 @@ function saveSettings(settings) {
     baseUrl: baseUrl,
     apiFormat: apiFormat,
     model: String(settings.model || '').trim() || currentSettings.model || '',
+    profileName: normalizeProfileName_(settings.profileName),
     gradingMode: settings.gradingMode === 'all' ? 'all' : 'quantitative',
     maxScore: normalizeMaxScore_(settings.maxScore),
     maxOutputTokens: normalizeOutputTokens_(settings.maxOutputTokens),
     aiUseDetection: toBoolean_(settings.aiUseDetection)
   };
   const properties = PropertiesService.getUserProperties();
-  if (settings.apiKey && String(settings.apiKey).trim()) properties.setProperty('OPENAI_COMPATIBLE_API_KEY', String(settings.apiKey).trim());
+  if (settings.apiKey && String(settings.apiKey).trim()) {
+    properties.setProperty('OPENAI_COMPATIBLE_API_KEY', String(settings.apiKey).trim());
+    properties.setProperty('OPENAI_COMPATIBLE_API_KEY_UPDATED_AT', new Date().toISOString());
+  }
   PropertiesService.getUserProperties().setProperty(APP.settingsKey, JSON.stringify(normalized));
   return { ok: true, hasApiKey: Boolean(getApiKey_()) };
 }
 
-function listAvailableModels(baseUrl, apiFormat) {
-  const apiKey = getApiKey_();
-  if (!apiKey) throw new Error('API 키를 먼저 저장해 주세요.');
+function listAvailableModels(baseUrl, apiFormat, profileName) {
   const settings = getSettings_();
   const selectedFormat = normalizeApiFormat_(apiFormat || settings.apiFormat);
+  const apiKey = resolveKeyForProfile_(String(profileName || ''));
   const modelsUrl = getModelsUrl_(baseUrl || settings.baseUrl);
   const response = UrlFetchApp.fetch(modelsUrl, {
     method: 'get',
@@ -193,9 +204,22 @@ function getApiKey_() {
   return String(properties.getProperty('OPENAI_COMPATIBLE_API_KEY') || properties.getProperty('XKIRO_API_KEY') || '').trim();
 }
 
-function testProviderConnection(baseUrl, apiFormat, model) {
-  const apiKey = getApiKey_();
-  if (!apiKey) throw new Error('API 키를 먼저 저장해 주세요.');
+function getApiKeyStatus_() {
+  const key = getApiKey_();
+  if (!key) return { hasKey: false, suffix: '', updatedAt: '' };
+  return {
+    hasKey: true,
+    suffix: key.length > 4 ? key.slice(-4) : '',
+    updatedAt: toIso_(PropertiesService.getUserProperties().getProperty('OPENAI_COMPATIBLE_API_KEY_UPDATED_AT'))
+  };
+}
+
+function getApiKeyStatus() {
+  return getApiKeyStatus_();
+}
+
+function testProviderConnection(baseUrl, apiFormat, model, profileName) {
+  const apiKey = resolveKeyForProfile_(String(profileName || ''));
   const settings = getSettings_();
   const format = normalizeApiFormat_(apiFormat || settings.apiFormat);
   const root = normalizeBaseUrl_(baseUrl || settings.baseUrl);
@@ -234,6 +258,131 @@ function buildConnectionReport_(url, response) {
     status: status,
     snippet: body.slice(0, 500)
   };
+}
+
+function normalizeProfileName_(value) {
+  return String(value || '').trim().slice(0, 100);
+}
+
+function defaultBaseUrlForFormat_(apiFormat) {
+  const format = normalizeApiFormat_(apiFormat);
+  if (format === 'responses') return 'https://api.openai.com/v1';
+  if (format === 'claude') return 'https://api.anthropic.com/v1';
+  if (format === 'gemini') return 'https://generativelanguage.googleapis.com/v1beta';
+  return '';
+}
+
+function ensureProfilesSheet_() {
+  const spreadsheet = SpreadsheetApp.getActive();
+  const headers = ['제공업체', 'API 규격', 'Base URL', 'API 키', '모델', '메모'];
+  let sheet = spreadsheet.getSheetByName(APP.profilesSheet);
+  const isNew = !sheet;
+  if (!sheet) sheet = spreadsheet.insertSheet(APP.profilesSheet);
+  if (sheet.isSheetHidden()) sheet.showSheet();
+  const width = Math.max(sheet.getLastColumn(), headers.length);
+  const currentHeader = sheet.getLastRow() > 0
+    ? sheet.getRange(1, 1, 1, width).getValues()[0].map(function(cell) { return String(cell || '').trim(); })
+    : [];
+  if (currentHeader.join('|') !== headers.join('|')) {
+    sheet.getRange(1, 1, 1, headers.length).setValues([headers]).setFontWeight('bold');
+    sheet.setFrozenRows(1);
+  }
+  const formatRule = SpreadsheetApp.newDataValidation()
+    .requireValueInList(['chat_completions', 'responses', 'claude', 'gemini'], true)
+    .setAllowInvalid(true)
+    .build();
+  sheet.getRange(2, 2, Math.max(sheet.getMaxRows() - 1, 1), 1).setDataValidation(formatRule);
+  if (isNew) {
+    const templates = [
+      ['OpenAI 호환', 'chat_completions', '', '', '', 'Base URL 입력 필수'],
+      ['OpenAI', 'responses', '', '', '', 'Base URL 비우면 자동 입력'],
+      ['Claude', 'claude', '', '', '', 'Base URL 비우면 자동 입력'],
+      ['Gemini', 'gemini', '', '', 'gemini-2.0-flash', 'Base URL 비우면 자동 입력']
+    ];
+    sheet.getRange(2, 1, templates.length, headers.length).setValues(templates);
+    sheet.setColumnWidths(1, headers.length, 200);
+  }
+  return sheet;
+}
+
+function setupProfilesSheet() {
+  ensureProfilesSheet_();
+  return getProfiles();
+}
+
+function listProfiles_() {
+  const sheet = SpreadsheetApp.getActive().getSheetByName(APP.profilesSheet);
+  if (!sheet || sheet.getLastRow() < 2) return [];
+  const rows = sheet.getRange(2, 1, sheet.getLastRow() - 1, 6).getValues();
+  const profiles = [];
+  rows.forEach(function(row) {
+    const name = String(row[0] || '').trim();
+    if (!name) return;
+    const apiFormat = normalizeApiFormat_(row[1]);
+    const cellUrl = normalizeBaseUrl_(row[2]);
+    profiles.push({
+      name: name,
+      apiFormat: apiFormat,
+      baseUrl: cellUrl || defaultBaseUrlForFormat_(apiFormat),
+      key: String(row[3] || ''),
+      model: String(row[4] || '').trim(),
+      note: String(row[5] || '')
+    });
+  });
+  return profiles;
+}
+
+function getProfiles() {
+  const sheet = SpreadsheetApp.getActive().getSheetByName(APP.profilesSheet);
+  if (!sheet) return [];
+  return listProfiles_().map(function(profile) {
+    return {
+      name: profile.name,
+      apiFormat: profile.apiFormat,
+      baseUrl: profile.baseUrl,
+      model: profile.model,
+      hasKey: Boolean(String(profile.key || '').trim()),
+      note: profile.note
+    };
+  });
+}
+
+function getProfileByName_(name) {
+  const target = String(name || '').trim();
+  const found = listProfiles_().filter(function(profile) { return profile.name === target; });
+  if (!found.length) throw new Error('"' + target + '" 제공업체를 ' + APP.profilesSheet + ' 시트에서 찾지 못했습니다. 시트 새로고침 후 다시 선택해 주세요.');
+  return found[0];
+}
+
+function resolveKeyForProfile_(profileName) {
+  const name = String(profileName || '').trim();
+  if (name) {
+    const profile = getProfileByName_(name);
+    const key = String(profile.key || '').trim();
+    if (!key) {
+      const error = new Error('"' + name + '" 제공업체의 API 키가 ' + APP.profilesSheet + ' 시트에 비어 있습니다.');
+      error.isPermanentProviderError = true;
+      throw error;
+    }
+    return key;
+  }
+  const key = getApiKey_();
+  if (!key) {
+    const error = new Error('API 키를 먼저 저장해 주세요.');
+    error.isPermanentProviderError = true;
+    throw error;
+  }
+  return key;
+}
+
+function resolveJobKey_(job) {
+  try {
+    return resolveKeyForProfile_(job.profileName);
+  } catch (error) {
+    if (error.isPermanentProviderError) throw error;
+    error.isPermanentProviderError = true;
+    throw error;
+  }
 }
 
 function browseClassroomRootFolder_() {
@@ -423,11 +572,13 @@ function getDriveBreadcrumbs_(folder, driveId) {
 }
 
 function createJobs(request) {
-  if (!getApiKey_()) throw new Error('API 키를 먼저 저장해 주세요.');
+  const settings = getSettings_();
+  const profileName = normalizeProfileName_(request.profileName || '');
+  if (profileName) getProfileByName_(profileName);
+  resolveKeyForProfile_(profileName);
   if (!request.assignmentFolderId || request.assignmentFolderId === 'root') throw new Error('과제 폴더를 선택해 주세요.');
   if (!request.answerKeyId) throw new Error('정답지 Google Docs를 선택해 주세요.');
 
-  const settings = getSettings_();
   const baseUrl = normalizeBaseUrl_(request.baseUrl || settings.baseUrl);
   if (!baseUrl) throw new Error('API Base URL을 입력해 주세요.');
   const apiFormat = normalizeApiFormat_(request.apiFormat || settings.apiFormat);
@@ -465,6 +616,7 @@ function createJobs(request) {
     gradingMode: mode,
     maxScore: maxScore,
     model: model,
+    profileName: profileName,
     maxOutputTokens: maxOutputTokens,
     aiUseDetection: aiUseDetection,
     status: 'WAITING',
@@ -622,12 +774,14 @@ function processStoredJob_(job, startedAt) {
   saveJob_(job);
   try {
     const answerKeyText = extractGoogleDocText_(job.answerKeyId);
-    const documents = candidates.map(function(item) {
+    const documents = candidates.map(function(item, index) {
+      const ephemeralId = 'S' + (index + 1);
+      const alias = '학생' + ('00' + (index + 1)).slice(-2);
       return {
-        submissionId: item.submissionId,
-        studentName: item.studentName,
-        documentName: item.docName,
-        text: extractGoogleDocText_(item.docId)
+        submissionId: ephemeralId,
+        studentName: alias,
+        documentName: alias + ' 답안',
+        text: anonymizeSubmissionText_(extractGoogleDocText_(item.docId), item.studentName, alias)
       };
     });
     const response = gradeAssignmentWithApi_(job, answerKeyText, documents);
@@ -636,8 +790,9 @@ function processStoredJob_(job, startedAt) {
       if (result && result.submissionId) resultMap[String(result.submissionId)] = result;
     });
     const resultRows = [];
-    candidates.forEach(function(item) {
-      const result = resultMap[String(item.submissionId)];
+    documents.forEach(function(document, index) {
+      const item = candidates[index];
+      const result = resultMap[String(document.submissionId)];
       item.updatedAt = new Date().toISOString();
       if (!result) {
         item.status = 'ERROR';
@@ -645,6 +800,9 @@ function processStoredJob_(job, startedAt) {
         return;
       }
       const normalized = normalizeGrade_(result, job);
+      normalized.feedback = anonymizeSubmissionText_(normalized.feedback, item.studentName, '해당 학생');
+      normalized.aiUseSuspicionReason = anonymizeSubmissionText_(normalized.aiUseSuspicionReason, item.studentName, '해당 학생');
+      normalized.aiUseEvidence = anonymizeSubmissionText_(normalized.aiUseEvidence, item.studentName, '해당 학생');
       item.status = 'DONE';
       item.score = normalized.score;
       item.quantitativeScore = normalized.quantitativeScore;
@@ -730,7 +888,7 @@ function buildResultRow_(job, submission, normalized) {
   return [
     submission.studentName, normalized.score, Number(job.maxScore), normalized.aiUseSuspicion,
     normalized.aiUseSuspicionScore, normalized.qualitativeScore, normalized.feedback,
-    normalized.confidence, new Date(), job.courseName, job.assignmentTitle, submission.studentId,
+    new Date(), job.courseName,
     'https://docs.google.com/document/d/' + submission.docId + '/edit',
     'https://docs.google.com/document/d/' + job.answerKeyId + '/edit',
     normalized.aiUseSuspicionReason, normalized.aiUseEvidence, job.jobId
@@ -739,7 +897,7 @@ function buildResultRow_(job, submission, normalized) {
 
 function writeResultRowsOnce_(sheet, rows) {
   const lastRow = sheet.getLastRow();
-  const existing = lastRow > 1 ? sheet.getRange(2, 13, lastRow - 1, 5).getValues() : [];
+  const existing = lastRow > 1 ? sheet.getRange(2, 10, lastRow - 1, 5).getValues() : [];
   const rowByKey = {};
   existing.forEach(function(row, index) {
     const answerUrl = String(row[0] || '');
@@ -751,7 +909,7 @@ function writeResultRowsOnce_(sheet, rows) {
     const safeRow = row.map(function(value) {
       return typeof value === 'string' ? safeSheetText_(value) : value;
     });
-    const key = String(row[16]) + '|' + String(row[12]);
+    const key = String(row[13]) + '|' + String(row[9]);
     const existingRow = rowByKey[key];
     if (existingRow) {
       sheet.getRange(existingRow, 1, 1, safeRow.length).setValues([safeRow]);
@@ -856,12 +1014,7 @@ function assertCompatibleBaseUrl_(baseUrl, apiFormat) {
 }
 
 function gradeAssignmentWithApi_(job, answerKeyText, documents) {
-  const apiKey = getApiKey_();
-  if (!apiKey) {
-    const error = new Error('API 키가 없습니다. 사이드바에서 다시 저장해 주세요.');
-    error.isPermanentProviderError = true;
-    throw error;
-  }
+  const apiKey = resolveJobKey_(job);
   const baseUrl = normalizeBaseUrl_(job.baseUrl || getSettings_().baseUrl);
   const model = String(job.model || '').trim();
   if (!model) {
@@ -873,7 +1026,7 @@ function gradeAssignmentWithApi_(job, answerKeyText, documents) {
     ? '정량평가 점수와 정성평가 점수를 모두 반영해 finalScore를 계산한다.'
     : '빈칸, 객관식, 단답형 등 정량적으로 판정 가능한 문항만 점수에 반영한다. 정성평가는 0점으로 두고 참고 피드백만 작성한다.';
   const aiDetectionRule = job.aiUseDetection
-    ? '정성평가 문장에 대해 AI 사용 의심 신호도 분석하라. 이는 확정 판정이 아니라 참고용 휴리스틱이며, 문체만으로 단정하지 마라. aiUseSuspicion은 high|medium|low 중 하나, aiUseSuspicionScore는 0~100, aiUseSuspicionReason은 짧은 설명, aiUseEvidence는 답안에서 관찰된 근거 문장 배열로 반환하라.'
+    ? 'AI 사용 의심 분석을 수행하라. 다음 신호를 각각 확인하고 해당되는 것만 근거로 삼아라: (1) 문장 길이·구조의 과도한 균일성과 접속사·완결형 종결의 기계적 반복, (2) 질문과 무관한 일반론·사전식 정의의 장황한 서론, (3) 오탈자·구어체·개인 경험·구체적 수업 언급의 완전한 부재와 추상적·포괄적 표현의 지배, (4) 답안 내부에 공존하는 급격한 수준 차이(어휘·논리 비약), (5) 동일 표현·문형의 반복. 맞춤법이 깨끗하다는 이유만으로는 의심하지 마라. aiUseEvidence에는 답안에서 발췌한 원문 1~3개를 반드시 넣어라. 근거가 없으면 low·0점을 주어라. aiUseSuspicionScore는 0~100이며 70 이상 high, 30~69 medium, 29 이하 low로 수준과 일치시켜라. 이는 참고용 신호이며 확정 판정이 아니다.'
     : 'AI 사용 의심 분석은 요청되지 않았다. aiUseSuspicion은 not_checked, aiUseSuspicionScore는 0, aiUseSuspicionReason과 aiUseEvidence는 빈 값으로 반환하라.';
   const gradingData = JSON.stringify({
     answerKey: answerKeyText,
@@ -893,6 +1046,7 @@ function gradeAssignmentWithApi_(job, answerKeyText, documents) {
     gradingRule,
     aiDetectionRule,
     '정답지에 명시된 배점과 채점 기준을 우선하며, 불확실한 경우 confidence를 낮춰라.',
+    '답안 텍스트에 이름·학번 등 개인 식별 정보가 남아 있을 수 있다. 이를 평가에 이용하지 말고, feedback을 포함한 출력 어디에도 개인 식별 정보를 언급·추측하지 마라.',
     '학생별 결과를 빠짐없이 반환하고 submissionId를 절대 변경하지 마라.',
     '오직 유효한 JSON만 반환하라. Markdown 코드 펜스나 설명은 금지한다.',
     'JSON 형식: {"results":[{"submissionId":"문자열","quantitativeScore":숫자,"qualitativeScore":숫자,"finalScore":숫자,"feedback":"짧고 구체적인 피드백","confidence":"high|medium|low","aiUseSuspicion":"high|medium|low|not_checked","aiUseSuspicionScore":숫자,"aiUseSuspicionReason":"문자열","aiUseEvidence":["문자열"]}]}',
@@ -1074,8 +1228,8 @@ function getAssignmentResultSheet_(job) {
   const spreadsheet = SpreadsheetApp.getActive();
   const sheetName = sanitizeSheetName_(String(job.courseName || '클래스') + '_' + String(job.assignmentTitle || '과제'));
   const headers = [
-    '학생명', '점수', '만점', 'AI 의심', 'AI 의심 점수', '정성점수', '피드백', '신뢰도',
-    '채점일시', '클래스', '과제', '학생ID', '학생 답안', '정답지', 'AI 의심 이유',
+    '학생명', '점수', '만점', 'AI 의심', 'AI 의심 점수', '정성점수', '피드백',
+    '채점일시', '클래스', '학생 답안', '정답지', 'AI 의심 이유',
     'AI 의심 근거', '작업ID'
   ];
   ensureSheet_(spreadsheet, sheetName, headers);
@@ -1085,14 +1239,20 @@ function getAssignmentResultSheet_(job) {
     const oldRows = sheet.getLastRow() > 1 ? sheet.getRange(2, 1, sheet.getLastRow() - 1, 18).getValues() : [];
     const migratedRows = oldRows.map(function(row) {
       return [
-        row[4], row[6], row[7], row[14] || 'not_checked', row[15] || 0, row[9], row[10], row[11],
-        row[0], row[2], row[3], row[5], row[12], row[13], row[16] || '', row[17] || '', row[1]
+        row[4], row[6], row[7], row[14] || 'not_checked', row[15] || 0, row[9], row[10],
+        row[0], row[2], row[12], row[13], row[16] || '', row[17] || '', row[1]
       ];
     });
     sheet.clearContents();
     sheet.getRange(1, 1, 1, headers.length).setValues([headers]).setFontWeight('bold');
     if (migratedRows.length) sheet.getRange(2, 1, migratedRows.length, headers.length).setValues(migratedRows);
     sheet.setFrozenRows(1);
+  } else {
+    ['학생ID', '신뢰도', '과제'].forEach(function(title) {
+      const header = sheet.getRange(1, 1, 1, sheet.getLastColumn()).getValues()[0];
+      const index = header.indexOf(title);
+      if (index >= 0) sheet.deleteColumn(index + 1);
+    });
   }
   return sheet;
 }
@@ -1108,14 +1268,15 @@ function normalizeGrade_(result, job) {
   const qualitativeScore = job.gradingMode === 'all' ? clamp_(Number(result.qualitativeScore) || 0, 0, maxScore) : 0;
   let score = job.gradingMode === 'all' ? Number(result.finalScore) : quantitativeScore;
   if (!isFinite(score)) score = job.gradingMode === 'all' ? qualitativeScore : quantitativeScore;
+  const aiScore = job.aiUseDetection ? clamp_(Number(result.aiUseSuspicionScore) || 0, 0, 100) : 0;
   return {
     score: round_(clamp_(score, 0, maxScore)),
     quantitativeScore: round_(quantitativeScore),
     qualitativeScore: round_(qualitativeScore),
     feedback: String(result.feedback || '').slice(0, 2000),
     confidence: ['high', 'medium', 'low'].indexOf(String(result.confidence)) >= 0 ? String(result.confidence) : 'medium',
-    aiUseSuspicion: job.aiUseDetection ? normalizeSuspicionLevel_(result.aiUseSuspicion) : 'not_checked',
-    aiUseSuspicionScore: job.aiUseDetection ? clamp_(Number(result.aiUseSuspicionScore) || 0, 0, 100) : 0,
+    aiUseSuspicion: job.aiUseDetection ? (aiScore >= 70 ? 'high' : (aiScore >= 30 ? 'medium' : 'low')) : 'not_checked',
+    aiUseSuspicionScore: job.aiUseDetection ? aiScore : 0,
     aiUseSuspicionReason: job.aiUseDetection ? String(result.aiUseSuspicionReason || '').slice(0, 1000) : '',
     aiUseEvidence: job.aiUseDetection ? normalizeEvidence_(result.aiUseEvidence) : ''
   };
@@ -1158,20 +1319,21 @@ function removeQueueTriggers_() {
 
 function getSettings_() {
   const raw = PropertiesService.getUserProperties().getProperty(APP.settingsKey);
-  if (!raw) return { baseUrl: '', apiFormat: 'chat_completions', model: '', gradingMode: 'quantitative', maxScore: 100, maxOutputTokens: APP.defaultMaxOutputTokens, aiUseDetection: false };
+  if (!raw) return { baseUrl: '', apiFormat: 'chat_completions', model: '', profileName: '', gradingMode: 'quantitative', maxScore: 100, maxOutputTokens: APP.defaultMaxOutputTokens, aiUseDetection: false };
   try {
     const value = JSON.parse(raw);
     return {
       baseUrl: normalizeBaseUrl_(value.baseUrl),
       apiFormat: normalizeApiFormat_(value.apiFormat),
       model: String(value.model || '').trim(),
+      profileName: normalizeProfileName_(value.profileName),
       gradingMode: value.gradingMode === 'all' ? 'all' : 'quantitative',
       maxScore: normalizeMaxScore_(value.maxScore),
       maxOutputTokens: normalizeOutputTokens_(value.maxOutputTokens || APP.defaultMaxOutputTokens),
       aiUseDetection: toBoolean_(value.aiUseDetection)
     };
   } catch (ignored) {
-    return { baseUrl: '', apiFormat: 'chat_completions', model: '', gradingMode: 'quantitative', maxScore: 100, maxOutputTokens: APP.defaultMaxOutputTokens, aiUseDetection: false };
+    return { baseUrl: '', apiFormat: 'chat_completions', model: '', profileName: '', gradingMode: 'quantitative', maxScore: 100, maxOutputTokens: APP.defaultMaxOutputTokens, aiUseDetection: false };
   }
 }
 
@@ -1209,6 +1371,26 @@ function normalizeSuspicionLevel_(value) {
 function normalizeEvidence_(value) {
   if (Array.isArray(value)) return value.map(function(item) { return String(item); }).join(' | ').slice(0, 2000);
   return String(value || '').slice(0, 2000);
+}
+
+var ANONYMIZE_STOPWORDS_ = ['과제', '제출', '답안', '답안지', '문서', '파일', '수행평가', '수행', '평가', '시험', '기말', '중간', '고사', '중간고사', '기말고사', '차시', '교시', '학기', '이름', '학번', '학년', '제출물', '사본', '복사본', '최종', '수정', '완성', '수학', '국어', '영어', '과학', '사회', '역사', '음악', '미술', '체육', '도덕', '실과', '한문', '물리', '화학', '생물', '지구과학', '문제', '문항', '지문', '정답', '오답', '해설', '풀이', '배점', '점수'];
+
+function replaceTokenInsensitive_(text, token, alias) {
+  const escaped = String(token).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  return String(text).replace(new RegExp(escaped, 'gi'), alias);
+}
+
+function anonymizeSubmissionText_(text, studentName, alias) {
+  let out = String(text || '');
+  const full = String(studentName || '').trim();
+  if (full.length >= 3 && ANONYMIZE_STOPWORDS_.indexOf(full) < 0) out = replaceTokenInsensitive_(out, full, alias);
+  const tokens = full.split(/[\s_\-·.,()\[\]{}]+/).filter(function(token) {
+    return token.length >= 2 && ANONYMIZE_STOPWORDS_.indexOf(token) < 0 && !/^\d+$/.test(token);
+  });
+  tokens.forEach(function(token) {
+    out = replaceTokenInsensitive_(out, token, alias);
+  });
+  return out;
 }
 
 function toBoolean_(value) {
