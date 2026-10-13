@@ -37,10 +37,15 @@ Google Apps Script 기반의 AI 자동 채점 도구입니다. Google Classroom 
 
 | 설정 항목 | 설명 | 기본값 |
 |----------|------|--------|
-| API 규격 | 사용할 AI API 형식 | Chat Completions |
-| 모델 | 사용할 AI 모델 | gpt-4o-mini |
+| API 규격 | chat_completions · responses · claude · gemini | chat_completions |
+| Base URL | responses·claude·gemini는 고정값 자동 입력, chat_completions는 직접 입력 | 규격별 상이 |
+| 모델 | 불러오기로 조회 후 선택 또는 직접 입력 (과제 등록 시 필수) | 없음 |
+| 제공업체 시트 | `AI채점_설정` 시트에 제공업체·규격·키·모델 저장 후 선택 | - |
+| 만점 | 총점 | 100 |
+| 점수 반영 범위 | 정량만 / 정량+정성 | 정량만 |
+| AI 의심 분석 | 참고용 신호 (70 이상 high, 30~69 medium) | 끔 |
 | 최대 출력 토큰 | AI 응답 최대 길이 | 65536 |
-| 재시도 횟수 | API 호출 실패 시 재시도 횟수 | 5회 |
+| 재시도 | 실패 시 10분 간격 최대 5회, 크레딧 부족 시 중단 | 5회 |
 
 ## 라이선스
 
